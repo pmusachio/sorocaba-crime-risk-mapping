@@ -1,0 +1,29 @@
+# Dados brutos — não versionar (volume ~890MB, fora do escopo do Git)
+data/raw/
+*.xlsx
+*.csv
+!data/schema_samples/*.csv
+
+# Landing em Parquet — gerado por scripts/converter_para_parquet.py, enviado ao
+# Databricks, nunca versionado
+data/parquet/
+*.parquet
+
+# Databricks
+.databricks/
+*.dbc
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+venv/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Credenciais (nunca versionar)
+*.env
+secrets.json
