@@ -1,3 +1,4 @@
+# Databricks notebook source
 # =============================================================================
 # MVP Engenharia de Dados — Mapa de Risco Criminal em Sorocaba
 # Notebook 00 — Coleta Incremental + Bronze
@@ -201,7 +202,8 @@ for ano, (arquivo, guias) in CONFIG_ANOS.items():
         continue
 
     motivo = "novo" if cl_anterior is None else ("ano corrente" if cl_novo == cl_anterior else f"tamanho: {cl_anterior/1e6:.1f}→{cl_novo/1e6:.1f} MB")
-    print(f"\n[{ano}] Processando ({motivo}) ...")
+    print(f"
+[{ano}] Processando ({motivo}) ...")
 
     # Download
     caminho_xlsx = os.path.join(LOCAL_XLSX, arquivo)
@@ -250,7 +252,8 @@ for ano, (arquivo, guias) in CONFIG_ANOS.items():
     anos_processados.append(ano)
     print(f"  [{ano}] Bronze atualizado: {n_linhas:,} linhas")
 
-print(f"\nAnos processados: {anos_processados or 'nenhum (sem alterações)'}")
+print(f"
+Anos processados: {anos_processados or 'nenhum (sem alterações)'}")
 print(f"Bronze total    : {spark.table('bronze').count():,} linhas")
 
 # COMMAND ----------

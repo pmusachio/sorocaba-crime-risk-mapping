@@ -1,3 +1,4 @@
+# Databricks notebook source
 # =============================================================================
 # MVP Engenharia de Dados — Mapa de Risco Criminal em Sorocaba
 # Notebook 01 — Silver + Gold (Esquema Estrela)
@@ -278,12 +279,14 @@ for t in ["bronze", "silver", "dim_data", "dim_local", "dim_tipo_ocorrencia", "f
     print(f"  {t:<25}: {spark.table(t).count():,}")
 
 fato = spark.table("fato_ocorrencia")
-print("\nIntegridade referencial (deve ser 0 em todas):")
+print("
+Integridade referencial (deve ser 0 em todas):")
 print(f"  id_local nulo          : {fato.filter(F.col('id_local').isNull()).count():,}")
 print(f"  id_tipo_ocorrencia nulo: {fato.filter(F.col('id_tipo_ocorrencia').isNull()).count():,}")
 print(f"  id_data nulo (s/data)  : {fato.filter(F.col('id_data').isNull()).count():,}")
 
-print("\nDistribuição de partições (ano_mes_ocorrencia):")
+print("
+Distribuição de partições (ano_mes_ocorrencia):")
 spark.sql("""
     SELECT ano_mes_ocorrencia, COUNT(*) AS total
     FROM fato_ocorrencia
