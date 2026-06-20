@@ -1,24 +1,13 @@
 # =============================================================================
 # MVP Engenharia de Dados — Mapa de Risco Criminal em Sorocaba
-# Pipeline: Bronze (raw) -> Silver (limpo/reconciliado) -> Gold (Esquema Estrela)
-# Plataforma: Databricks Community Edition · Formato: Delta Lake
-# Fonte: SSP-SP / Dados Abertos SP — licença CC-BY 4.0
-# =============================================================================
+# Notebook 01 — Silver + Gold (Esquema Estrela)
 #
-# Pré-requisito (rodar UMA vez, localmente, fora do Databricks):
-#   1. python3 scripts/coletar_dados.py          # baixa os .xlsx da SSP-SP
-#   2. python3 scripts/converter_para_parquet.py # gera data/parquet/ (landing)
-#   3. Suba o diretório data/parquet/ para um Volume/DBFS do Databricks.
+# Pré-requisito: notebook 00_coleta_incremental já escreveu a tabela Bronze.
+# Este notebook lê a Bronze, aplica transformações de qualidade (Silver) e
+# constrói o Esquema Estrela (Gold), particionado por ano-mês da ocorrência.
 #
-# Por que Parquet e não .xlsx direto no Databricks:
-#   - O Spark não lê .xlsx nativamente; ler ~190 MB com pandas no driver do
-#     Community Edition estoura a memória. Parquet é colunar, comprimido e lido
-#     nativa e distribuidamente pelo Spark. Ver justificativa no Catálogo de Dados.
-#
-# Como usar este notebook:
-#   - Importe como notebook (.py: cada "# COMMAND ----------" vira uma célula).
-#   - Ajuste RAW_PARQUET_PATH e SCHEMA na célula de configuração.
-#   - Rode célula a célula na ordem.
+# Pode ser executado diretamente (após o 00) ou encadeado via
+# dbutils.notebook.run() pelo notebook 00 no pipeline semanal.
 # =============================================================================
 
 # COMMAND ----------
@@ -31,78 +20,62 @@ from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.types import IntegerType, DoubleType
 
-# Caminho do landing em Parquet, já enviado ao Volume/DBFS (ajuste ao seu ambiente)
-RAW_PARQUET_PATH = "/Volumes/main/default/sorocaba_seguranca/parquet"
-# Caso não use Unity Catalog Volumes no Community Edition, use DBFS clássico:
-# RAW_PARQUET_PATH = "dbfs:/FileStore/sorocaba_seguranca/parquet"
-
-# Schema (database) onde as tabelas Delta gerenciadas serão registradas — permite
-# consulta SQL direta (FROM sorocaba_seguranca.fato_ocorrencia) e gera evidência limpa.
-SCHEMA = "sorocaba_seguranca"
-
-MUNICIPIO_ALVO = "SOROCABA"
-SENTINELA = "NÃO INFORMADO"   # membro de dimensão para chaves naturais ausentes (evita FK nula)
+SCHEMA    = "sorocaba_seguranca"
+MUNICIPIO = "SOROCABA"
+SENTINELA = "NÃO INFORMADO"   # membro de dimensão para chaves naturais ausentes
 
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
 spark.sql(f"USE {SCHEMA}")
 
 # COMMAND ----------
 # MAGIC %md
-# MAGIC ## 1. Camada Bronze — ingestão fiel à origem
+# MAGIC ## 1. Camada Bronze — leitura
 # MAGIC
-# MAGIC O landing em Parquet preserva cada guia de cada ano com os nomes de coluna
-# MAGIC **originais** e tudo como string (inclusive sentinelas da fonte: `'NULL'`,
-# MAGIC `'(Vazio)'`, `'-'`, `'0'` em lat/long). A reconciliação de nomes e a tipagem
-# MAGIC só acontecem na Silver.
+# MAGIC A Bronze é escrita pelo notebook `00_coleta_incremental`, que baixa os xlsx
+# MAGIC da SSP-SP direto para o DBFS e converte via openpyxl streaming (sem OOM).
+# MAGIC Aqui lemos a tabela já existente para seguir para Silver + Gold.
 # MAGIC
-# MAGIC `mergeSchema=true` une anos com schemas diferentes: como 2022 usa `CIDADE` e
-# MAGIC 2023+ usa `NOME_MUNICIPIO`, e `DESCR_TIPOLOCAL` só existe a partir de 2025,
-# MAGIC o schema final é a UNIÃO das colunas — cada uma fica nula nos anos em que
-# MAGIC não existia. Isso é o comportamento correto para fidelidade ao dado bruto.
+# MAGIC A tabela preserva os nomes de coluna **originais** de cada ano (`CIDADE` em 2022
+# MAGIC vs `NOME_MUNICIPIO` em 2023+, `DESCR_TIPOLOCAL` só a partir de 2025) e tudo como
+# MAGIC string, incluindo sentinelas da fonte (`'NULL'`, `'(Vazio)'`, `'-'`, `'0'`).
+# MAGIC A reconciliação de nomes e a tipagem acontecem na Silver.
 
 # COMMAND ----------
 
-df_bronze = (
-    spark.read
-    .option("mergeSchema", "true")
-    .parquet(RAW_PARQUET_PATH)
-)
+df_b = spark.table("bronze")
 
-df_bronze.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable("bronze")
-
-print(f"Bronze: {df_bronze.count():,} linhas, {len(df_bronze.columns)} colunas (todo o Estado de SP)")
-print("Colunas:", df_bronze.columns)
+print(f"Bronze: {df_b.count():,} linhas, {len(df_b.columns)} colunas (todo o Estado de SP)")
+print("Colunas:", df_b.columns)
 
 # COMMAND ----------
 # MAGIC %md
-# MAGIC ## 2. Camada Silver — reconciliação, tipagem, limpeza e filtro de Sorocaba
+# MAGIC ## 2. Camada Silver — reconciliação, tipagem, limpeza e filtro
 # MAGIC
-# MAGIC Transformações aplicadas (documentadas em detalhe no Catálogo de Dados, Seção 7):
+# MAGIC Transformações (documentadas no Catálogo de Dados, Seção 7):
 # MAGIC
-# MAGIC 1. **Reconciliação de schema por `coalesce`** das colunas variantes entre anos
-# MAGIC    (ex.: `municipio = coalesce(CIDADE, NOME_MUNICIPIO)`). Feita por NOME, nunca
-# MAGIC    por posição.
-# MAGIC 2. **Tipagem com formato correto**: as datas vêm como `yyyy-MM-dd` (datetime
-# MAGIC    nativo do Excel, renderizado na conversão) — NÃO no formato `M/d/yy`.
-# MAGIC 3. **Tratamento de sentinelas**: `'NULL'`, `'(Vazio)'`, `'-'`, `''` e `0`/`0.0`
-# MAGIC    em latitude/longitude viram nulo real.
-# MAGIC 4. **Normalização de texto** para o filtro de município (remove acento, espaços
-# MAGIC    e caixa) — corrige o `"SOROCABA "` com espaço à direita que existe em parte
-# MAGIC    das guias e que quebraria um filtro ingênuo por igualdade.
-# MAGIC 5. **Normalização de `desc_periodo`** para um conjunto canônico (a fonte grava
-# MAGIC    `EM HORA INCERTA` e `Em hora incerta` em anos diferentes).
+# MAGIC 1. **Reconciliação de schema por `coalesce`** — colunas variantes entre anos
+# MAGIC    unificadas por NOME, nunca por posição.
+# MAGIC 2. **Tipagem com formato correto** — datas vêm como `yyyy-MM-dd` (datetime
+# MAGIC    nativo do Excel renderizado na conversão do notebook 00), NÃO `M/d/yy`.
+# MAGIC 3. **Tratamento de sentinelas** — `'NULL'`, `'(Vazio)'`, `'-'`, `''` e `0`
+# MAGIC    em lat/long viram nulo real.
+# MAGIC 4. **Normalização + filtro de município** — corrige `"SOROCABA "` com espaço.
+# MAGIC 5. **Normalização de `desc_periodo`** — unifica grafias entre anos.
+# MAGIC 6. **`ano_mes_ocorrencia`** — coluna de particionamento derivada de
+# MAGIC    `dt_ocorrencia_bo` no formato `yyyyMM` (ex.: `'202204'`). Registros sem
+# MAGIC    data recebem sentinela `'000000'` para não serem descartados.
 
 # COMMAND ----------
 
+
 def col_ou_nulo(df: DataFrame, nome: str):
-    """Retorna a coluna se existir no DataFrame; senão, um literal nulo.
-    Torna a reconciliação robusta a colunas ausentes em algum ano."""
+    """Retorna a coluna se existir; senão um literal nulo."""
     return F.col(f"`{nome}`") if nome in df.columns else F.lit(None)
 
 
 def normaliza_texto_col(col):
     """Remove acentuação, espaços nas pontas e aplica caixa alta."""
-    de = "ÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇáàâãäéèêëíìîïóòôõöúùûüç"
+    de   = "ÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇáàâãäéèêëíìîïóòôõöúùûüç"
     para = "AAAAAEEEEIIIIOOOOOUUUUCaaaaaeeeeiiiiooooouuuuc"
     return F.upper(F.trim(F.translate(col, de, para)))
 
@@ -112,17 +85,17 @@ def to_null_se(col, valores):
     return F.when(F.trim(col).isin(*valores), None).otherwise(col)
 
 
-df_b = spark.table("bronze")
-
-# --- (1) Reconciliação para nomes canônicos via coalesce das variantes por ano ---
+# --- (1) Reconciliação para nomes canônicos ---
 df_s = df_b.select(
     F.coalesce(col_ou_nulo(df_b, "CIDADE"), col_ou_nulo(df_b, "NOME_MUNICIPIO")).alias("municipio"),
     col_ou_nulo(df_b, "NUM_BO").alias("num_bo"),
     col_ou_nulo(df_b, "ANO_BO").alias("ano_bo"),
     col_ou_nulo(df_b, "DATA_OCORRENCIA_BO").alias("dt_ocorrencia_bo"),
-    F.coalesce(col_ou_nulo(df_b, "DATA_COMUNICACAO_BO"), col_ou_nulo(df_b, "DATA_REGISTRO")).alias("dt_registro_bo"),
+    F.coalesce(col_ou_nulo(df_b, "DATA_COMUNICACAO_BO"),
+               col_ou_nulo(df_b, "DATA_REGISTRO")).alias("dt_registro_bo"),
     col_ou_nulo(df_b, "HORA_OCORRENCIA_BO").alias("hora_ocorrencia_bo"),
-    F.coalesce(col_ou_nulo(df_b, "DESCR_PERIODO"), col_ou_nulo(df_b, "DESC_PERIODO")).alias("desc_periodo"),
+    F.coalesce(col_ou_nulo(df_b, "DESCR_PERIODO"),
+               col_ou_nulo(df_b, "DESC_PERIODO")).alias("desc_periodo"),
     col_ou_nulo(df_b, "DESCR_TIPOLOCAL").alias("descr_tipolocal"),
     col_ou_nulo(df_b, "DESCR_SUBTIPOLOCAL").alias("descr_subtipolocal"),
     col_ou_nulo(df_b, "BAIRRO").alias("bairro"),
@@ -145,18 +118,17 @@ df_s = df_b.select(
     F.col("_guia_origem"),
 )
 
-# --- (2) Tipagem com formatos corretos ---
+# --- (2) Tipagem ---
 df_s = (
     df_s
     .withColumn("dt_ocorrencia_bo", F.to_date("dt_ocorrencia_bo", "yyyy-MM-dd"))
-    .withColumn("dt_registro_bo", F.to_date("dt_registro_bo", "yyyy-MM-dd"))
-    .withColumn("ano_bo", F.col("ano_bo").cast(IntegerType()))
-    .withColumn("mes_estatistica", F.col("mes_estatistica").cast(IntegerType()))
-    .withColumn("ano_estatistica", F.col("ano_estatistica").cast(IntegerType()))
+    .withColumn("dt_registro_bo",   F.to_date("dt_registro_bo",   "yyyy-MM-dd"))
+    .withColumn("ano_bo",           F.col("ano_bo").cast(IntegerType()))
+    .withColumn("mes_estatistica",  F.col("mes_estatistica").cast(IntegerType()))
+    .withColumn("ano_estatistica",  F.col("ano_estatistica").cast(IntegerType()))
 )
 
-# --- (3) Sentinelas -> nulo ---
-# Latitude/longitude: '-', 'NULL', '' já caem no cast; o 0/0.0 é sentinela de "sem geo"
+# --- (3) Sentinelas → nulo ---
 for c in ["latitude", "longitude"]:
     df_s = df_s.withColumn(c, to_null_se(F.col(c), ["-", "NULL", ""]).cast(DoubleType()))
     df_s = df_s.withColumn(c, F.when(F.col(c) == 0, None).otherwise(F.col(c)))
@@ -165,35 +137,40 @@ df_s = df_s.withColumn("cod_ibge", to_null_se(F.col("cod_ibge"), ["(Vazio)", "NU
 df_s = df_s.withColumn("numero_logradouro", to_null_se(F.col("numero_logradouro"), ["", "NULL", "0"]).cast(IntegerType()))
 df_s = df_s.withColumn("hora_ocorrencia_bo", to_null_se(F.col("hora_ocorrencia_bo"), ["NULL", "", "-"]))
 
-# 'NULL'/'' -> nulo nas demais colunas de texto
-colunas_texto = ["municipio", "num_bo", "desc_periodo", "descr_tipolocal", "descr_subtipolocal",
-                 "bairro", "logradouro", "rubrica", "descr_conduta", "natureza_apurada",
-                 "nome_departamento", "nome_seccional", "nome_delegacia", "municipio_circunscricao"]
-for c in colunas_texto:
+for c in ["municipio", "num_bo", "desc_periodo", "descr_tipolocal", "descr_subtipolocal",
+          "bairro", "logradouro", "rubrica", "descr_conduta", "natureza_apurada",
+          "nome_departamento", "nome_seccional", "nome_delegacia", "municipio_circunscricao"]:
     df_s = df_s.withColumn(c, to_null_se(F.col(c), ["NULL", ""]))
 
 # --- (4) Normalização + filtro de município ---
-df_s = df_s.withColumn("municipio_normalizado", normaliza_texto_col(F.col("municipio")))
-df_s = df_s.filter(F.col("municipio_normalizado") == MUNICIPIO_ALVO)
+df_s = df_s.withColumn("_municipio_norm", normaliza_texto_col(F.col("municipio")))
+df_s = df_s.filter(F.col("_municipio_norm") == MUNICIPIO)
 
-# --- (5) Normalização de desc_periodo para conjunto canônico ---
-periodo_norm = normaliza_texto_col(F.col("desc_periodo"))
+# --- (5) Normalização de desc_periodo ---
+pn = normaliza_texto_col(F.col("desc_periodo"))
 df_s = df_s.withColumn(
     "desc_periodo",
-    F.when(periodo_norm == "DE MADRUGADA", "De madrugada")
-     .when(periodo_norm == "PELA MANHA", "Pela manhã")
-     .when(periodo_norm == "A TARDE", "A tarde")
-     .when(periodo_norm == "A NOITE", "A noite")
-     .when(periodo_norm == "EM HORA INCERTA", "Em hora incerta")
+    F.when(pn == "DE MADRUGADA",   "De madrugada")
+     .when(pn == "PELA MANHA",     "Pela manhã")
+     .when(pn == "A TARDE",        "A tarde")
+     .when(pn == "A NOITE",        "A noite")
+     .when(pn == "EM HORA INCERTA","Em hora incerta")
      .otherwise(F.col("desc_periodo"))
 )
 
-df_silver = df_s.drop("municipio_normalizado")
+# --- (6) Coluna de particionamento: ano-mês da ocorrência ---
+# Formato yyyyMM (ex.: '202204'). Registros sem data recebem '000000'.
+df_s = df_s.withColumn(
+    "ano_mes_ocorrencia",
+    F.coalesce(F.date_format(F.col("dt_ocorrencia_bo"), "yyyyMM"), F.lit("000000"))
+)
+
+df_silver = df_s.drop("_municipio_norm")
 
 df_silver.write.format("delta").mode("overwrite").option("overwriteSchema", "true") \
-    .partitionBy("ano_estatistica").saveAsTable("silver")
+    .partitionBy("ano_mes_ocorrencia").saveAsTable("silver")
 
-print(f"Silver: {df_silver.count():,} linhas (filtradas para Sorocaba)")
+print(f"Silver: {df_silver.count():,} linhas (Sorocaba) — particionado por ano_mes_ocorrencia")
 
 # COMMAND ----------
 # MAGIC %md
@@ -202,17 +179,15 @@ print(f"Silver: {df_silver.count():,} linhas (filtradas para Sorocaba)")
 # MAGIC **Fato:** `fato_ocorrencia` — grão = 1 rubrica registrada em 1 BO.
 # MAGIC **Dimensões:** `dim_data`, `dim_local` (grão = bairro), `dim_tipo_ocorrencia`.
 # MAGIC
-# MAGIC Duas decisões de modelagem importantes:
+# MAGIC Decisões de modelagem:
 # MAGIC
-# MAGIC - **Sem FK nula (membro "NÃO INFORMADO").** Toda chave natural nula (ex.:
-# MAGIC   `descr_tipolocal` em 2022–2024) é substituída por um membro-sentinela ANTES
-# MAGIC   de construir a dimensão e de ligar o fato. Isso evita o problema clássico de
-# MAGIC   `NULL = NULL` não casar em join, que descartaria silenciosamente a maioria
-# MAGIC   dos registros anteriores a 2025.
-# MAGIC - **`dim_local` no grão de bairro** (não por coordenada exata). Latitude e
-# MAGIC   longitude são atributos do evento e ficam na própria fato (dimensão
-# MAGIC   degenerada); a `dim_local` guarda o bairro normalizado e um centroide
-# MAGIC   (média das coordenadas válidas), útil para mapas por bairro.
+# MAGIC - **Sem FK nula** — toda chave natural nula é substituída por `'NÃO INFORMADO'`
+# MAGIC   **antes** de construir a dimensão e ligar o fato. Evita o problema clássico de
+# MAGIC   `NULL = NULL` não casar em join (crítico: `descr_tipolocal` é nulo em 2022–2024).
+# MAGIC - **`dim_local` no grão de bairro** — lat/long ficam na fato como dimensão
+# MAGIC   degenerada; a dim_local guarda centroide para mapas.
+# MAGIC - **Particionamento por `ano_mes_ocorrencia`** — permite reprocessar apenas os
+# MAGIC   meses afetados por cada atualização incremental (replaceWhere).
 
 # COMMAND ----------
 
@@ -223,23 +198,25 @@ chaves_tipo = ["rubrica", "natureza_apurada", "descr_tipolocal", "descr_subtipol
 g = silver
 for c in chaves_tipo:
     g = g.withColumn(c, F.coalesce(F.col(c), F.lit(SENTINELA)))
-g = g.withColumn("bairro_norm", F.coalesce(normaliza_texto_col(F.col("bairro")), F.lit(SENTINELA)))
+g = g.withColumn("bairro_norm",
+                 F.coalesce(normaliza_texto_col(F.col("bairro")), F.lit(SENTINELA)))
 
 # --- dim_data ---
 df_dim_data = (
-    g.select(F.col("dt_ocorrencia_bo").alias("data")).where(F.col("data").isNotNull()).distinct()
-    .withColumn("id_data", F.date_format("data", "yyyyMMdd").cast(IntegerType()))
-    .withColumn("ano", F.year("data"))
-    .withColumn("mes", F.month("data"))
-    .withColumn("dia", F.dayofmonth("data"))
-    .withColumn("trimestre", F.quarter("data"))
-    .withColumn("dia_semana_num", F.dayofweek("data"))  # 1=domingo .. 7=sábado (padrão Spark)
-    .withColumn("dia_semana_nome", F.array(
-        F.lit("Domingo"), F.lit("Segunda"), F.lit("Terça"), F.lit("Quarta"),
-        F.lit("Quinta"), F.lit("Sexta"), F.lit("Sábado"))[F.col("dia_semana_num") - 1])
-    .withColumn("fim_de_semana", F.col("dia_semana_num").isin(1, 7))
-    .select("id_data", "data", "ano", "mes", "dia", "trimestre",
-            "dia_semana_num", "dia_semana_nome", "fim_de_semana")
+    g.select(F.col("dt_ocorrencia_bo").alias("data"))
+     .where(F.col("data").isNotNull()).distinct()
+     .withColumn("id_data",       F.date_format("data", "yyyyMMdd").cast(IntegerType()))
+     .withColumn("ano",           F.year("data"))
+     .withColumn("mes",           F.month("data"))
+     .withColumn("dia",           F.dayofmonth("data"))
+     .withColumn("trimestre",     F.quarter("data"))
+     .withColumn("dia_semana_num",F.dayofweek("data"))
+     .withColumn("dia_semana_nome", F.array(
+         F.lit("Domingo"), F.lit("Segunda"), F.lit("Terça"),  F.lit("Quarta"),
+         F.lit("Quinta"),  F.lit("Sexta"),   F.lit("Sábado"))[F.col("dia_semana_num") - 1])
+     .withColumn("fim_de_semana", F.col("dia_semana_num").isin(1, 7))
+     .select("id_data", "data", "ano", "mes", "dia", "trimestre",
+             "dia_semana_num", "dia_semana_nome", "fim_de_semana")
 )
 
 # --- dim_local (grão = bairro, com centroide) ---
@@ -257,55 +234,62 @@ df_dim_local = (
 # --- dim_tipo_ocorrencia ---
 df_dim_tipo = (
     g.select(*chaves_tipo).distinct()
-    .withColumn("id_tipo_ocorrencia", F.monotonically_increasing_id())
-    .select("id_tipo_ocorrencia", *chaves_tipo)
+     .withColumn("id_tipo_ocorrencia", F.monotonically_increasing_id())
+     .select("id_tipo_ocorrencia", *chaves_tipo)
 )
 
-# Persiste as dimensões e relê para fixar os surrogate keys antes de ligar o fato
-df_dim_data.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable("dim_data")
-df_dim_local.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable("dim_local")
-df_dim_tipo.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable("dim_tipo_ocorrencia")
+# Persiste dimensões e relê para fixar surrogate keys antes de construir o fato
+df_dim_data.write.format("delta").mode("overwrite").option("overwriteSchema","true").saveAsTable("dim_data")
+df_dim_local.write.format("delta").mode("overwrite").option("overwriteSchema","true").saveAsTable("dim_local")
+df_dim_tipo.write.format("delta").mode("overwrite").option("overwriteSchema","true").saveAsTable("dim_tipo_ocorrencia")
 
 dim_local = spark.table("dim_local").select("id_local", "bairro")
-dim_tipo = spark.table("dim_tipo_ocorrencia")
+dim_tipo  = spark.table("dim_tipo_ocorrencia")
 
 # --- fato_ocorrencia ---
 df_fato = (
     g
     .join(dim_local, g["bairro_norm"] == dim_local["bairro"], "left")
-    .join(dim_tipo, on=chaves_tipo, how="left")
+    .join(dim_tipo,  on=chaves_tipo, how="left")
     .withColumn("id_data", F.date_format("dt_ocorrencia_bo", "yyyyMMdd").cast(IntegerType()))
     .select(
         "num_bo", "ano_bo", "id_data", "id_local", "id_tipo_ocorrencia",
         "hora_ocorrencia_bo", "desc_periodo",
         "logradouro", "numero_logradouro", "latitude", "longitude",
-        "mes_estatistica", "ano_estatistica",
+        "mes_estatistica", "ano_estatistica", "ano_mes_ocorrencia",
         F.lit(1).alias("quantidade"),
     )
 )
 
 df_fato.write.format("delta").mode("overwrite").option("overwriteSchema", "true") \
-    .partitionBy("ano_estatistica").saveAsTable("fato_ocorrencia")
+    .partitionBy("ano_mes_ocorrencia").saveAsTable("fato_ocorrencia")
 
 # COMMAND ----------
 # MAGIC %md
 # MAGIC ## 4. Validação pós-carga
 # MAGIC
-# MAGIC Confirma a persistência e a corretude do esquema estrela: contagens e,
-# MAGIC sobretudo, a **ausência de FK nula** no fato (prova de que a correção do
-# MAGIC join por sentinela funcionou).
+# MAGIC Contagens de cada tabela e **ausência de FK nula no fato** — comprova que a
+# MAGIC correção de join por sentinela funcionou.
 
 # COMMAND ----------
 
 print("Linhas por tabela:")
 for t in ["bronze", "silver", "dim_data", "dim_local", "dim_tipo_ocorrencia", "fato_ocorrencia"]:
-    print(f"  {t:<22}: {spark.table(t).count():,}")
+    print(f"  {t:<25}: {spark.table(t).count():,}")
 
 fato = spark.table("fato_ocorrencia")
 print("\nIntegridade referencial (deve ser 0 em todas):")
-print(f"  id_local nulo        : {fato.filter(F.col('id_local').isNull()).count():,}")
-print(f"  id_tipo nulo         : {fato.filter(F.col('id_tipo_ocorrencia').isNull()).count():,}")
-print(f"  id_data nulo (s/data): {fato.filter(F.col('id_data').isNull()).count():,}")
+print(f"  id_local nulo          : {fato.filter(F.col('id_local').isNull()).count():,}")
+print(f"  id_tipo_ocorrencia nulo: {fato.filter(F.col('id_tipo_ocorrencia').isNull()).count():,}")
+print(f"  id_data nulo (s/data)  : {fato.filter(F.col('id_data').isNull()).count():,}")
+
+print("\nDistribuição de partições (ano_mes_ocorrencia):")
+spark.sql("""
+    SELECT ano_mes_ocorrencia, COUNT(*) AS total
+    FROM fato_ocorrencia
+    GROUP BY ano_mes_ocorrencia
+    ORDER BY ano_mes_ocorrencia
+""").show(50, truncate=False)
 
 # COMMAND ----------
 # MAGIC %md
@@ -313,3 +297,6 @@ print(f"  id_data nulo (s/data): {fato.filter(F.col('id_data').isNull()).count()
 # MAGIC
 # MAGIC - `02_qualidade_dados` — análise de qualidade por atributo (sobre a Silver).
 # MAGIC - `03_analise_perguntas_negocio` — respostas às 6 perguntas (sobre a Gold).
+
+# COMMAND ----------
+dbutils.notebook.exit("ok")

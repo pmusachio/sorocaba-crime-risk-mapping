@@ -1,0 +1,73 @@
+name: Pipeline Semanal SSP-SP
+
+# Verifica e ingere dados novos da SSP-SP toda segunda-feira às 6h UTC.
+# O notebook 00_coleta_incremental detecta alterações via Content-Length
+# e só reprocessa anos cujo arquivo mudou. 2026 é sempre verificado.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # toda segunda-feira às 06:00 UTC
+  workflow_dispatch:        # permite trigger manual pela UI do GitHub
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180    # cluster startup (~5-10 min) + execução dos 3 notebooks
+
+    steps:
+      - name: Submeter notebook 00 no Databricks
+        id: submit
+        run: |
+          RESPONSE=$(curl -sf -X POST \
+            -H "Authorization: Bearer ${{ secrets.DATABRICKS_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            "${{ secrets.DATABRICKS_HOST }}/api/2.1/jobs/runs/submit" \
+            -d "{
+              \"run_name\": \"pipeline_semanal_$(date +%Y%m%d)\",
+              \"existing_cluster_id\": \"${{ secrets.DATABRICKS_CLUSTER_ID }}\",
+              \"notebook_task\": {
+                \"notebook_path\": \"/Repos/${{ secrets.DATABRICKS_USER }}/sorocaba-crime-risk-mapping/notebooks/00_coleta_incremental\"
+              }
+            }")
+          echo "Resposta da API: $RESPONSE"
+          RUN_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['run_id'])")
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Run submetido com ID: $RUN_ID"
+
+      - name: Aguardar conclusão (poll a cada 60 s)
+        id: wait
+        run: |
+          RUN_ID="${{ steps.submit.outputs.run_id }}"
+          for i in $(seq 1 160); do
+            PAYLOAD=$(curl -sf \
+              -H "Authorization: Bearer ${{ secrets.DATABRICKS_TOKEN }}" \
+              "${{ secrets.DATABRICKS_HOST }}/api/2.1/jobs/runs/get?run_id=$RUN_ID")
+            STATE=$(echo "$PAYLOAD" | python3 -c \
+              "import sys,json; print(json.load(sys.stdin)['state']['life_cycle_state'])")
+            echo "[$(date -u +%H:%M:%S)] [$i/160] Estado: $STATE"
+            case "$STATE" in
+              TERMINATED|SKIPPED|INTERNAL_ERROR)
+                RESULT=$(echo "$PAYLOAD" | python3 -c \
+                  "import sys,json; print(json.load(sys.stdin)['state'].get('result_state','UNKNOWN'))")
+                echo "result=$RESULT" >> "$GITHUB_OUTPUT"
+                echo "Estado final: $RESULT"
+                break ;;
+            esac
+            sleep 60
+          done
+
+      - name: Verificar resultado
+        run: |
+          RESULT="${{ steps.wait.outputs.result }}"
+          if [[ "$RESULT" != "SUCCESS" ]]; then
+            echo "Pipeline falhou ou não concluiu: $RESULT"
+            echo "Veja os logs em ${{ secrets.DATABRICKS_HOST }}/#job/runs/${{ steps.submit.outputs.run_id }}"
+            exit 1
+          fi
+          echo "Pipeline concluído com sucesso."
+
+# Segredos necessários no repositório (Settings → Secrets → Actions):
+#   DATABRICKS_HOST        ex.: https://community.cloud.databricks.com
+#   DATABRICKS_TOKEN       token gerado em User Settings → Access Tokens
+#   DATABRICKS_CLUSTER_ID  ID do cluster (URL do cluster no Databricks)
+#   DATABRICKS_USER        e-mail cadastrado no Databricks (ex.: paulomusachio@gmail.com)
