@@ -5,9 +5,9 @@
 #
 # Responsabilidades:
 #   1. Verificar se os arquivos da SSP-SP foram atualizados (HTTP Content-Length)
-#   2. Baixar para Unity Catalog Volume apenas os anos novos ou com arquivo alterado
+#   2. Baixar para /tmp do driver apenas os anos novos ou com arquivo alterado
 #      (ano corrente é sempre reverificado — pode ter novos meses)
-#   3. Converter xlsx → Parquet via openpyxl streaming (sem OOM)
+#   3. Converter xlsx → Parquet em /tmp via openpyxl streaming (sem OOM)
 #   4. Escrever/atualizar a camada Bronze em Delta Lake (incremental por _ano_arquivo)
 #
 # Ponto de entrada do pipeline semanal orquestrado pelo GitHub Actions (Job).
@@ -33,14 +33,12 @@ import pyarrow.parquet as pq
 from pyspark.sql import functions as F
 
 CATALOG = "workspace"
-SCHEMA  = "sorocoba_seguranca"
-VOLUME  = "dados"
+SCHEMA  = "sorocaba_seguranca"
 
-# Unity Catalog Volume — substitui DBFS (desativado no Free Edition)
-# Python I/O usa /Volumes/<cat>/<schema>/<vol>/; Spark lê o mesmo path diretamente.
-VOL_BASE      = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME}"
-LOCAL_XLSX    = f"{VOL_BASE}/xlsx"
-LOCAL_PARQUET = f"{VOL_BASE}/parquet"
+# Arquivos intermediários em /tmp (disponível no driver serverless).
+# O Bronze Delta é o artefato persistente — salvo via saveAsTable no catálogo.
+LOCAL_XLSX    = "/tmp/sorocaba_xlsx"
+LOCAL_PARQUET = "/tmp/sorocaba_parquet"
 
 URL_TEMPLATE = (
     "https://www.ssp.sp.gov.br/assets/estatistica/transparencia/"
@@ -68,7 +66,8 @@ os.makedirs(LOCAL_PARQUET, exist_ok=True)
 
 print(f"Catalog : {CATALOG}")
 print(f"Schema  : {SCHEMA}")
-print(f"Volume  : {VOL_BASE}")
+print(f"Xlsx tmp: {LOCAL_XLSX}")
+print(f"Pq  tmp : {LOCAL_PARQUET}")
 
 # COMMAND ----------
 # MAGIC %md
@@ -217,11 +216,12 @@ for ano, (arquivo, guias) in CONFIG_ANOS.items():
     for guia in guias:
         converter_guia_parquet(caminho_xlsx, guia, ano, dir_parquet)
 
-    # Lê Parquet do Volume e grava/atualiza partição _ano_arquivo na Bronze
+    # Lê Parquet do /tmp (local do driver) e grava na Bronze Delta
+    # file:// é necessário para Spark apontar ao filesystem local, não ao DBFS
     df_new = (
         spark.read
         .option("mergeSchema", "true")
-        .parquet(f"{LOCAL_PARQUET}/{ano}")
+        .parquet(f"file://{LOCAL_PARQUET}/{ano}")
     )
 
     bronze_existe = (
