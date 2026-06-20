@@ -18,23 +18,24 @@ Estado de São Paulo (SSP-SP), filtrados para o município de Sorocaba.
 ## 2. Linhagem (visão geral do pipeline)
 
 ```
-RAW (.xlsx por ano, todo o Estado de SP)
-  -> LANDING PARQUET (scripts/converter_para_parquet.py; fiel à origem, nomes
-     originais, tudo string, sentinelas preservadas) — formato que o Spark lê
-     nativa e distribuidamente, evitando OOM no driver
-  -> BRONZE (Delta; união de todas as guias/anos via mergeSchema, schema original
-     preservado + colunas de auditoria)
+SSP-SP (URL pública, 1 xlsx/ano, todo o Estado de SP)
+  -> DOWNLOAD (urllib, /tmp do driver serverless; ~190 MB por arquivo)
+  -> CONVERSÃO IN-MEMORY (openpyxl streaming, lotes de 50 k linhas
+     → pandas DataFrame → spark.createDataFrame() → Delta staging temporária)
+  -> BRONZE (Delta; schema original preservado + colunas de auditoria;
+     escrita incremental por _ano_arquivo via replaceWhere)
   -> SILVER (Delta; schema reconciliado por coalesce, tipagem, limpeza de
-     sentinelas, filtro município = Sorocaba)
+     sentinelas, filtro município = Sorocaba; particionado por ano_mes_ocorrencia)
   -> GOLD (Delta; Esquema Estrela — 1 fato + 3 dimensões)
 ```
 
-**Por que a etapa de Landing em Parquet existe:** o Spark não lê `.xlsx` nativamente
-e ler um arquivo de ~190 MB com pandas no driver do Databricks Community Edition
-estoura a memória. A conversão para Parquet (colunar e comprimido) acontece uma vez,
-localmente, e é o diretório Parquet — não os `.xlsx` — que é enviado ao Databricks.
-Código: [`scripts/coletar_dados.py`](../scripts/coletar_dados.py) (download) e
-[`scripts/converter_para_parquet.py`](../scripts/converter_para_parquet.py) (conversão).
+**Por que não há etapa de Landing em Parquet:** o Databricks Free Edition desativou
+o DBFS público e bloqueia acesso do Spark a caminhos locais (`/tmp`). A solução é
+converter o xlsx em memória — openpyxl streaming em lotes de 50 k linhas, cada lote
+convertido para pandas e ingerido via `spark.createDataFrame()`. O pico de memória
+fica limitado a um lote por vez; a escrita intermediária usa Delta staging (tabela
+temporária no catálogo, descartada após a carga do ano). O único artefato persistente
+é a tabela Bronze Delta no Unity Catalog (`workspace.sorocaba_seguranca.bronze`).
 
 A reconciliação de schema entre anos é necessária porque a fonte alterou nomes de
 coluna e adicionou um campo (`DESCR_TIPOLOCAL`) ao longo do tempo — ver Seção 6.
@@ -94,7 +95,8 @@ Reproduzido da aba `CAMPOS_DA_TABELA_SPDADOS`, presente em todos os arquivos da 
 | `latitude` | double | aprox. -23.65 a -23.35 ou nulo | Coordenada do evento (degenerada; nulo = sem geo, inclui sentinela `0` tratado) |
 | `longitude` | double | aprox. -47.55 a -47.30 ou nulo | Coordenada do evento (degenerada) |
 | `mes_estatistica` | int | 1–12 | Mês de registro na estatística oficial |
-| `ano_estatistica` | int | 2022–2026 | Ano de registro (= ano do arquivo); **coluna de particionamento** |
+| `ano_estatistica` | int | 2022–2026 | Ano de registro (= ano do arquivo) |
+| `ano_mes_ocorrencia` | string | `yyyyMM`, ex.: `202603`; `000000` quando nulo | Partição da tabela (derivado de `dt_ocorrencia_bo`; sentinel `000000` evita FK nula) |
 | `quantidade` | int | Sempre `1` | Medida aditiva (`SUM(quantidade)` = `COUNT(*)`) |
 
 **Nota de unicidade:** `num_bo` isolado NÃO é chave única — um mesmo BO pode conter

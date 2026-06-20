@@ -36,16 +36,22 @@ construção do pipeline):
 - **Reconciliação de schema entre 5 anos.** Renomeações (`CIDADE`→`NOME_MUNICIPIO`),
   troca de cedilha nas colunas de circunscrição e a entrada de `DESCR_TIPOLOCAL` em
   2025 exigiram reconciliação por nome (nunca por posição).
-- **Leitura de `.xlsx` grande na nuvem.** Arquivos de ~190 MB inviabilizam a leitura
-  com pandas no driver do Community Edition (risco de OOM). A solução foi converter
-  para Parquet localmente e subir só o Parquet — decisão que também tornou a ingestão
-  no Spark nativa e distribuída.
+- **Leitura de `.xlsx` grande em serverless.** Arquivos de ~190 MB não podem ser
+  lidos diretamente pelo Spark. A solução final foi openpyxl streaming em lotes de
+  50 k linhas → pandas DataFrame → `spark.createDataFrame()` → Delta staging, sem
+  nenhum arquivo intermediário acessado pelo Spark. Abordagens anteriores tentadas
+  (DBFS, `/tmp` via `file://`) falharam com restrições do Free Edition serverless:
+  DBFS público desativado (`DBFS_DISABLED`) e filesystem local bloqueado pelo Spark
+  (`LocalFilesystemAccessDeniedException`).
 - **Semântica de ano estatístico × ano de ocorrência.** Descobrir que
   `ano_estatistica` é o ano de *registro* evitou tanto uma falsa detecção de "datas
   inválidas" (ocorrências de anos anteriores são legítimas) quanto conclusões erradas
   na análise de tendência.
-- *(Adicionar dificuldades de execução no Databricks após rodar: limites do cluster
-  Community Edition, tempo de processamento da Bronze com todo o Estado, etc.)*
+- **Databricks Free Edition substituiu o Community Edition** durante o desenvolvimento.
+  A migração exigiu adaptar toda a estratégia de armazenamento: DBFS desativado,
+  compute exclusivamente serverless (sem clusters all-purpose), Unity Catalog obrigatório.
+  A orquestração via Jobs nativos (DAG de 4 tasks) eliminou a dependência do GitHub
+  Actions como único orquestrador.
 
 ## 3. Trabalhos futuros
 
@@ -58,7 +64,7 @@ construção do pipeline):
 - Investigação da divergência de cardinalidade do campo município em 2022.
 - Ampliação para municípios vizinhos (Região Metropolitana de Sorocaba) para análise
   comparativa regional.
-- Automação da coleta (download agendado com verificação de atualização da fonte).
+- *(Automação da coleta já implementada: Job semanal no Databricks com detecção incremental via Content-Length.)*
 
 ## 4. Reflexão geral
 
