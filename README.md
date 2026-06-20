@@ -58,9 +58,11 @@ subsequente de Machine Learning voltado à predição de ocorrências.
 ```
 
 O Spark não lê `.xlsx` nativamente; openpyxl streaming em lotes de 100 k linhas
-evita OOM (pico de memória limitado a um lote por vez).
+evita OOM (pico de memória limitado a um lote por vez). Arquivos intermediários
+ficam em `/tmp` do driver — o único artefato persistente é o Bronze Delta Table
+no Unity Catalog (`workspace.sorocaba_seguranca`).
 
-**Plataforma:** Databricks Free Edition (Serverless) · **Storage:** Unity Catalog Volumes ·
+**Plataforma:** Databricks Free Edition (Serverless) · **Catálogo:** Unity Catalog ·
 **Formato:** Delta Lake · **Particionamento:** por `ano_mes_ocorrencia` (yyyyMM derivado de `dt_ocorrencia_bo`)
 
 ## Estrutura do repositório
@@ -68,26 +70,25 @@ evita OOM (pico de memória limitado a um lote por vez).
 ```
 .
 ├── docs/
-│   ├── objetivo.md                  # Problema e perguntas de negócio
-│   ├── catalogo_de_dados.md         # Domínio, linhagem e regras de cada tabela
-│   ├── autoavaliacao.md             # Avaliação crítica do trabalho realizado
-│   └── evidencias/                  # Screenshots/vídeos de execução no Databricks
-│   ├── RUNBOOK_DATABRICKS.md         # Passo a passo de execução no Databricks
-│   └── evidencias/                  # Screenshots/vídeos de execução no Databricks
+│   ├── objetivo.md                       # Problema e perguntas de negócio
+│   ├── catalogo_de_dados.md              # Domínio, linhagem e regras de cada tabela
+│   ├── autoavaliacao.md                  # Avaliação crítica do trabalho realizado
+│   ├── RUNBOOK_DATABRICKS.md             # Passo a passo de execução no Databricks
+│   └── evidencias/                       # Screenshots/vídeos de execução no Databricks
 ├── .github/
 │   └── workflows/
-│       └── pipeline_semanal.yml         # Orquestrador: cron semanal via GitHub Actions
+│       └── pipeline_semanal.yml          # Disparador manual via GitHub Actions (backup)
 ├── notebooks/
-│   ├── 00_coleta_incremental.py         # Coleta + Bronze (download DBFS + replaceWhere)
-│   ├── 01_pipeline_bronze_silver_gold.py# Silver + Gold (esquema estrela)
-│   ├── 02_qualidade_dados.py            # Análise de qualidade por atributo
-│   └── 03_analise_perguntas_negocio.py  # Resposta às 6 perguntas + EDA
+│   ├── 00_coleta_incremental.py          # Coleta + Bronze (download /tmp + replaceWhere)
+│   ├── 01_pipeline_bronze_silver_gold.py # Silver + Gold (esquema estrela)
+│   ├── 02_qualidade_dados.py             # Análise de qualidade por atributo
+│   └── 03_analise_perguntas_negocio.py   # Resposta às 6 perguntas + EDA
 ├── scripts/
-│   ├── coletar_dados.py             # Utilitário local (download manual, opcional)
-│   ├── converter_para_parquet.py    # Utilitário local (conversão manual, opcional)
-│   └── validar_municipio.py         # Utilitário de validação de schema/grafia
+│   ├── coletar_dados.py                  # Utilitário local (download manual, opcional)
+│   ├── converter_para_parquet.py         # Utilitário local (conversão manual, opcional)
+│   └── validar_municipio.py              # Utilitário de validação de schema/grafia
 └── data/
-    └── schema_samples/              # Amostras pequenas de schema (dado completo não versionado)
+    └── schema_samples/                   # Amostras pequenas de schema (dado completo não versionado)
 ```
 
 ## Fonte de dados
