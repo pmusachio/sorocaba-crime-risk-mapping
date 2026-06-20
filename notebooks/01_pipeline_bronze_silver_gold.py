@@ -7,8 +7,8 @@
 # Este notebook lê a Bronze, aplica transformações de qualidade (Silver) e
 # constrói o Esquema Estrela (Gold), particionado por ano-mês da ocorrência.
 #
-# Pode ser executado diretamente (após o 00) ou encadeado via
-# dbutils.notebook.run() pelo notebook 00 no pipeline semanal.
+# Pode ser executado diretamente (após o 00).
+# No pipeline semanal, é executado como task 2 do Job (sequência gerenciada pelo Job).
 # =============================================================================
 
 # COMMAND ----------
@@ -35,8 +35,8 @@ spark.sql(f"USE {CATALOG}.{SCHEMA}")
 # MAGIC ## 1. Camada Bronze — leitura
 # MAGIC
 # MAGIC A Bronze é escrita pelo notebook `00_coleta_incremental`, que baixa os xlsx
-# MAGIC da SSP-SP direto para o DBFS e converte via openpyxl streaming (sem OOM).
-# MAGIC Aqui lemos a tabela já existente para seguir para Silver + Gold.
+# MAGIC da SSP-SP para /tmp e converte via openpyxl streaming + pandas batches (sem OOM).
+# MAGIC Aqui lemos a tabela Delta já existente para seguir para Silver + Gold.
 # MAGIC
 # MAGIC A tabela preserva os nomes de coluna **originais** de cada ano (`CIDADE` em 2022
 # MAGIC vs `NOME_MUNICIPIO` em 2023+, `DESCR_TIPOLOCAL` só a partir de 2025) e tudo como
