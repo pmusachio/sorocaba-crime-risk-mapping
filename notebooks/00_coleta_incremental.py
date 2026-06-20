@@ -5,13 +5,12 @@
 #
 # Responsabilidades:
 #   1. Verificar se os arquivos da SSP-SP foram atualizados (HTTP Content-Length)
-#   2. Baixar para /tmp do driver apenas os anos novos ou com arquivo alterado
-#      (ano corrente é sempre reverificado — pode ter novos meses)
-#   3. Converter xlsx → Parquet em /tmp via openpyxl streaming (sem OOM)
+#   2. Baixar xlsx para /tmp do driver (anos novos ou com arquivo alterado)
+#   3. Converter xlsx → pandas batches → Spark DataFrame (sem arquivo intermediário)
 #   4. Escrever/atualizar a camada Bronze em Delta Lake (incremental por _ano_arquivo)
 #
-# Ponto de entrada do pipeline semanal orquestrado pelo GitHub Actions (Job).
-# O Job gerencia a sequência 00 → 01 → 02 → 03; este notebook não encadeia outros.
+# Ponto de entrada do pipeline semanal. O Job gerencia a sequência 00→01→02→03.
+# Sem dbutils.notebook.run() — evita dupla execução do notebook 01.
 # =============================================================================
 
 # COMMAND ----------
@@ -28,17 +27,16 @@ import os
 import urllib.request
 
 import openpyxl
-import pyarrow as pa
-import pyarrow.parquet as pq
+import pandas as pd
 from pyspark.sql import functions as F
 
 CATALOG = "workspace"
 SCHEMA  = "sorocaba_seguranca"
 
-# Arquivos intermediários em /tmp (disponível no driver serverless).
-# O Bronze Delta é o artefato persistente — salvo via saveAsTable no catálogo.
-LOCAL_XLSX    = "/tmp/sorocaba_xlsx"
-LOCAL_PARQUET = "/tmp/sorocaba_parquet"
+# xlsx vai para /tmp (disponível no driver serverless, os.makedirs funciona).
+# Sem Parquet intermediário: xlsx → pandas → spark.createDataFrame() → Delta staging.
+# O Spark em serverless não acessa /tmp — todo I/O Spark usa Delta no catálogo.
+LOCAL_XLSX = "/tmp/sorocaba_xlsx"
 
 URL_TEMPLATE = (
     "https://www.ssp.sp.gov.br/assets/estatistica/transparencia/"
@@ -54,20 +52,18 @@ CONFIG_ANOS = {
     2026: ("SPDadosCriminais_2026.xlsx", ["JAN-ABR_2026"]),
 }
 
-ANO_CORRENTE = max(CONFIG_ANOS.keys())  # sempre reverifica: pode ter meses novos
-LOTE         = 100_000                  # linhas por bloco de escrita (memória limitada)
+ANO_CORRENTE = max(CONFIG_ANOS.keys())
+LOTE         = 50_000   # linhas por pandas batch (mantém pico de RAM baixo)
 
 spark.sql(f"USE CATALOG {CATALOG}")
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
 spark.sql(f"USE {CATALOG}.{SCHEMA}")
 
-os.makedirs(LOCAL_XLSX,   exist_ok=True)
-os.makedirs(LOCAL_PARQUET, exist_ok=True)
+os.makedirs(LOCAL_XLSX, exist_ok=True)
 
 print(f"Catalog : {CATALOG}")
 print(f"Schema  : {SCHEMA}")
 print(f"Xlsx tmp: {LOCAL_XLSX}")
-print(f"Pq  tmp : {LOCAL_PARQUET}")
 
 # COMMAND ----------
 # MAGIC %md
@@ -125,12 +121,12 @@ def content_length_remoto(url: str) -> int:
         with urllib.request.urlopen(req, timeout=30) as r:
             return int(r.headers.get("Content-Length", 0))
     except Exception as e:
-        print(f"  HEAD falhou ({e}) — forçando download")
+        print(f"  HEAD falhou ({e}) — forcando download")
         return 0
 
 
 def render_valor(v):
-    """Converte célula Excel → string determinística (datas: yyyy-MM-dd, horas: HH:MM:SS)."""
+    """Converte celula Excel para string deterministica (datas: yyyy-MM-dd)."""
     if v is None:
         return None
     if isinstance(v, dt.datetime):
@@ -142,126 +138,132 @@ def render_valor(v):
     return str(v)
 
 
-def converter_guia_parquet(caminho_xlsx: str, guia: str, ano: int, dir_saida: str) -> int:
-    """Converte uma guia de xlsx para Parquet no DBFS; retorna total de linhas."""
+def processar_guia_staging(caminho_xlsx: str, guia: str, ano: int, staging: str) -> int:
+    """
+    Le uma guia xlsx em lotes via openpyxl streaming, converte para pandas e
+    escreve em Delta staging. Sem acesso ao filesystem pelo Spark.
+    Retorna total de linhas processadas.
+    """
+    ts       = dt.datetime.now().isoformat(timespec="seconds")
+    nome_arq = os.path.basename(caminho_xlsx)
+
     wb = openpyxl.load_workbook(caminho_xlsx, read_only=True, data_only=True)
     ws = wb[guia]
     rows_iter = ws.iter_rows(values_only=True)
 
-    header = [str(h).strip() for h in next(rows_iter)]
-    audit  = ["_arquivo_origem", "_guia_origem", "_ano_arquivo", "_dt_ingestao"]
-    todas  = header + audit
-    schema = pa.schema([(c, pa.string()) for c in todas])
+    header  = [str(h).strip() if h is not None else f"_col{i}"
+               for i, h in enumerate(next(rows_iter))]
+    audit   = ["_arquivo_origem", "_guia_origem", "_ano_arquivo", "_dt_ingestao"]
+    colunas = header + audit
 
-    nome_arq = os.path.basename(caminho_xlsx)
-    ts       = dt.datetime.now().isoformat(timespec="seconds")
-    saida    = os.path.join(dir_saida, f"{os.path.splitext(nome_arq)[0]}__{guia}.parquet")
-
-    writer = pq.ParquetWriter(saida, schema, compression="snappy")
-    buf, total = [], 0
+    buf   = []
+    total = 0
 
     def flush():
-        nonlocal buf, total
+        nonlocal total
         if not buf:
             return
-        n = len(buf)
-        cols = [[buf[i][j] for i in range(n)] for j in range(len(header))]
-        cols += [[nome_arq]*n, [guia]*n, [str(ano)]*n, [ts]*n]
-        tbl = pa.table({c: pa.array(cols[k], type=pa.string()) for k, c in enumerate(todas)})
-        writer.write_table(tbl)
-        total += n
+        dados = [
+            [render_valor(v) for v in row] + [nome_arq, guia, str(ano), ts]
+            for row in buf
+        ]
+        pdf = pd.DataFrame(dados, columns=colunas)
+        sdf = spark.createDataFrame(pdf)
+        (sdf.write.format("delta")
+         .mode("append")
+         .option("mergeSchema", "true")
+         .saveAsTable(staging))
+        total += len(buf)
         buf.clear()
+        print(f"      ... {total:,} linhas -> {staging}")
 
-    for r in rows_iter:
-        buf.append([render_valor(v) for v in r])
+    for row in rows_iter:
+        buf.append(row)
         if len(buf) >= LOTE:
             flush()
-            print(f"      ... {total:,} linhas gravadas")
     flush()
-    writer.close()
     wb.close()
-    print(f"    [{guia}] {total:,} linhas → {os.path.basename(saida)}")
+    print(f"    [{guia}] {total:,} linhas processadas")
     return total
 
 
-# --- Loop de processamento ---
+# --- Loop principal ---
 anos_processados = []
 
 for ano, (arquivo, guias) in CONFIG_ANOS.items():
-    url = URL_TEMPLATE.format(ano=ano)
+    url         = URL_TEMPLATE.format(ano=ano)
     cl_novo     = content_length_remoto(url)
     cl_anterior = controle_anterior(ano)
 
-    # Força reprocessamento do ano corrente (pode ter novos meses mesmo sem mudança de tamanho)
     precisa = (cl_novo != cl_anterior) or (ano == ANO_CORRENTE)
-
     if not precisa:
-        print(f"[{ano}] sem alteração ({cl_novo/1e6:.1f} MB) — pulado")
+        print(f"[{ano}] sem alteracao ({cl_novo/1e6:.1f} MB) — pulado")
         continue
 
-    motivo = "novo" if cl_anterior is None else ("ano corrente" if cl_novo == cl_anterior else f"tamanho: {cl_anterior/1e6:.1f}→{cl_novo/1e6:.1f} MB")
+    if cl_anterior is None:
+        motivo = "novo"
+    elif cl_novo == cl_anterior:
+        motivo = "ano corrente"
+    else:
+        motivo = f"tamanho: {cl_anterior/1e6:.1f}->{cl_novo/1e6:.1f} MB"
+
     print(f"\n[{ano}] Processando ({motivo}) ...")
 
-    # Download
+    # Download xlsx para /tmp
     caminho_xlsx = os.path.join(LOCAL_XLSX, arquivo)
     print(f"  Baixando {url} ...")
     urllib.request.urlretrieve(url, caminho_xlsx)
     print(f"  Download OK ({os.path.getsize(caminho_xlsx)/1e6:.1f} MB)")
 
-    # Conversão xlsx → Parquet por guia
-    dir_parquet = os.path.join(LOCAL_PARQUET, str(ano))
-    os.makedirs(dir_parquet, exist_ok=True)
-    print(f"  Convertendo {len(guias)} guia(s)...")
+    # Staging Delta temporaria para este ano
+    staging = f"_bronze_staging_{ano}"
+    spark.sql(f"DROP TABLE IF EXISTS {staging}")
+
+    total_linhas = 0
+    print(f"  Convertendo {len(guias)} guia(s) para {staging} ...")
     for guia in guias:
-        converter_guia_parquet(caminho_xlsx, guia, ano, dir_parquet)
+        total_linhas += processar_guia_staging(caminho_xlsx, guia, ano, staging)
 
-    # Lê Parquet do /tmp (local do driver) e grava na Bronze Delta
-    # file:// é necessário para Spark apontar ao filesystem local, não ao DBFS
-    df_new = (
-        spark.read
-        .option("mergeSchema", "true")
-        .parquet(f"file://{LOCAL_PARQUET}/{ano}")
-    )
-
-    bronze_existe = (
+    # Grava/atualiza particao _ano_arquivo na Bronze
+    df_staging = spark.table(staging)
+    ano_na_bronze = (
         spark.catalog.tableExists("bronze")
         and spark.sql(f"SELECT 1 FROM bronze WHERE _ano_arquivo='{ano}' LIMIT 1").count() > 0
     )
 
-    if bronze_existe:
-        print(f"  Atualizando partição _ano_arquivo='{ano}' na Bronze (replaceWhere)...")
-        (df_new.write.format("delta").mode("overwrite")
+    if ano_na_bronze:
+        print(f"  Atualizando _ano_arquivo='{ano}' na Bronze (replaceWhere)...")
+        (df_staging.write.format("delta").mode("overwrite")
          .option("replaceWhere", f"_ano_arquivo = '{ano}'")
          .option("mergeSchema", "true")
          .saveAsTable("bronze"))
     elif spark.catalog.tableExists("bronze"):
-        print(f"  Inserindo ano {ano} novo na Bronze (append)...")
-        (df_new.write.format("delta").mode("append")
+        print(f"  Inserindo ano {ano} na Bronze (append)...")
+        (df_staging.write.format("delta").mode("append")
          .option("mergeSchema", "true")
          .saveAsTable("bronze"))
     else:
-        print(f"  Criando tabela Bronze com ano {ano}...")
-        (df_new.write.format("delta").mode("overwrite")
+        print(f"  Criando tabela Bronze (ano {ano})...")
+        (df_staging.write.format("delta").mode("overwrite")
          .option("overwriteSchema", "true")
          .saveAsTable("bronze"))
 
-    n_linhas = df_new.count()
-    registrar_controle(ano, arquivo, url, cl_novo, n_linhas, "ok")
+    spark.sql(f"DROP TABLE IF EXISTS {staging}")
+    registrar_controle(ano, arquivo, url, cl_novo, total_linhas, "ok")
     anos_processados.append(ano)
-    print(f"  [{ano}] Bronze atualizado: {n_linhas:,} linhas")
+    print(f"  [{ano}] Bronze atualizado: {total_linhas:,} linhas")
 
-print("\nAnos processados:", anos_processados or "nenhum (sem alterações)")
+print("\nAnos processados:", anos_processados or "nenhum (sem alteracoes)")
 print(f"Bronze total    : {spark.table('bronze').count():,} linhas")
 
 # COMMAND ----------
 # MAGIC %md
-# MAGIC ## 3. Sumário de controle
+# MAGIC ## 3. Sumario de controle
 
 # COMMAND ----------
 
-# O Job gerencia a sequência 00 → 01 → 02 → 03.
-# Não encadeamos via dbutils.notebook.run() para evitar dupla execução.
-print("Histórico de downloads:")
+# O Job gerencia a sequencia 00 -> 01 -> 02 -> 03.
+print("Historico de downloads:")
 spark.sql("""
     SELECT ano, arquivo, round(content_length/1e6,1) AS mb,
            dt_download, n_linhas_bronze, status
