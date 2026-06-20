@@ -21,12 +21,14 @@ from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.types import IntegerType, DoubleType
 
+CATALOG   = "workspace"
 SCHEMA    = "sorocaba_seguranca"
 MUNICIPIO = "SOROCABA"
 SENTINELA = "NÃO INFORMADO"   # membro de dimensão para chaves naturais ausentes
 
-spark.sql(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
-spark.sql(f"USE {SCHEMA}")
+spark.sql(f"USE CATALOG {CATALOG}")
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
+spark.sql(f"USE {CATALOG}.{SCHEMA}")
 
 # COMMAND ----------
 # MAGIC %md

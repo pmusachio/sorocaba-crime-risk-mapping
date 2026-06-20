@@ -19,8 +19,10 @@
 
 from pyspark.sql import functions as F
 
-SCHEMA = "sorocaba_seguranca"
-spark.sql(f"USE {SCHEMA}")
+CATALOG = "workspace"
+SCHEMA  = "sorocaba_seguranca"
+spark.sql(f"USE CATALOG {CATALOG}")
+spark.sql(f"USE {CATALOG}.{SCHEMA}")
 
 df = spark.table("silver")
 total_linhas = df.count()

@@ -20,8 +20,10 @@ import seaborn as sns
 sns.set_theme(style="whitegrid")
 plt.rcParams["figure.figsize"] = (10, 5)
 
-SCHEMA = "sorocaba_seguranca"
-spark.sql(f"USE {SCHEMA}")  # permite consultar fato_ocorrencia, dim_* diretamente
+CATALOG = "workspace"
+SCHEMA  = "sorocaba_seguranca"
+spark.sql(f"USE CATALOG {CATALOG}")
+spark.sql(f"USE {CATALOG}.{SCHEMA}")  # permite consultar fato_ocorrencia, dim_* diretamente
 
 print("Tabelas disponíveis:")
 spark.sql("SHOW TABLES").show(truncate=False)

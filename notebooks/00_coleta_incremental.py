@@ -5,14 +5,13 @@
 #
 # Responsabilidades:
 #   1. Verificar se os arquivos da SSP-SP foram atualizados (HTTP Content-Length)
-#   2. Baixar para DBFS apenas os anos novos ou com arquivo alterado
+#   2. Baixar para Unity Catalog Volume apenas os anos novos ou com arquivo alterado
 #      (ano corrente é sempre reverificado — pode ter novos meses)
-#   3. Converter xlsx → Parquet em DBFS via openpyxl streaming (sem OOM)
+#   3. Converter xlsx → Parquet via openpyxl streaming (sem OOM)
 #   4. Escrever/atualizar a camada Bronze em Delta Lake (incremental por _ano_arquivo)
-#   5. Encadear o notebook 01 (Silver + Gold) quando houver dados novos
 #
-# Ponto de entrada do pipeline semanal orquestrado pelo GitHub Actions.
-# Pode também ser rodado manualmente para inicialização ou reprocessamento.
+# Ponto de entrada do pipeline semanal orquestrado pelo GitHub Actions (Job).
+# O Job gerencia a sequência 00 → 01 → 02 → 03; este notebook não encadeia outros.
 # =============================================================================
 
 # COMMAND ----------
@@ -33,14 +32,15 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from pyspark.sql import functions as F
 
-SCHEMA = "sorocaba_seguranca"
+CATALOG = "workspace"
+SCHEMA  = "sorocoba_seguranca"
+VOLUME  = "dados"
 
-# Caminhos no DBFS (dbfs:/... para Spark; /dbfs/... para I/O Python no driver)
-DBFS_BASE        = "dbfs:/FileStore/sorocaba_seguranca"
-DBFS_XLSX        = f"{DBFS_BASE}/xlsx"
-DBFS_PARQUET     = f"{DBFS_BASE}/parquet"
-LOCAL_XLSX       = "/dbfs/FileStore/sorocaba_seguranca/xlsx"
-LOCAL_PARQUET    = "/dbfs/FileStore/sorocaba_seguranca/parquet"
+# Unity Catalog Volume — substitui DBFS (desativado no Free Edition)
+# Python I/O usa /Volumes/<cat>/<schema>/<vol>/; Spark lê o mesmo path diretamente.
+VOL_BASE      = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME}"
+LOCAL_XLSX    = f"{VOL_BASE}/xlsx"
+LOCAL_PARQUET = f"{VOL_BASE}/parquet"
 
 URL_TEMPLATE = (
     "https://www.ssp.sp.gov.br/assets/estatistica/transparencia/"
@@ -59,17 +59,16 @@ CONFIG_ANOS = {
 ANO_CORRENTE = max(CONFIG_ANOS.keys())  # sempre reverifica: pode ter meses novos
 LOTE         = 100_000                  # linhas por bloco de escrita (memória limitada)
 
-spark.sql(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
-spark.sql(f"USE {SCHEMA}")
+spark.sql(f"USE CATALOG {CATALOG}")
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
+spark.sql(f"USE {CATALOG}.{SCHEMA}")
 
-dbutils.fs.mkdirs(DBFS_XLSX)
-dbutils.fs.mkdirs(DBFS_PARQUET)
 os.makedirs(LOCAL_XLSX,   exist_ok=True)
 os.makedirs(LOCAL_PARQUET, exist_ok=True)
 
+print(f"Catalog : {CATALOG}")
 print(f"Schema  : {SCHEMA}")
-print(f"DBFS xlsx   : {DBFS_XLSX}")
-print(f"DBFS parquet: {DBFS_PARQUET}")
+print(f"Volume  : {VOL_BASE}")
 
 # COMMAND ----------
 # MAGIC %md
@@ -218,11 +217,11 @@ for ano, (arquivo, guias) in CONFIG_ANOS.items():
     for guia in guias:
         converter_guia_parquet(caminho_xlsx, guia, ano, dir_parquet)
 
-    # Lê Parquet e grava/atualiza partição _ano_arquivo na Bronze
+    # Lê Parquet do Volume e grava/atualiza partição _ano_arquivo na Bronze
     df_new = (
         spark.read
         .option("mergeSchema", "true")
-        .parquet(f"{DBFS_PARQUET}/{ano}")
+        .parquet(f"{LOCAL_PARQUET}/{ano}")
     )
 
     bronze_existe = (
@@ -258,28 +257,12 @@ print(f"Bronze total    : {spark.table('bronze').count():,} linhas")
 
 # COMMAND ----------
 # MAGIC %md
-# MAGIC ## 3. Encadeamento — Silver + Gold
+# MAGIC ## 3. Sumário de controle
 
 # COMMAND ----------
 
-if anos_processados:
-    print("Encadeando notebook 01 (Silver + Gold)...")
-    result = dbutils.notebook.run(
-        "01_pipeline_bronze_silver_gold",   # relativo à pasta do notebook
-        timeout_seconds=7200,
-        arguments={"anos_atualizados": ",".join(str(a) for a in anos_processados)},
-    )
-    print(f"Notebook 01 concluído: {result}")
-else:
-    print("Sem dados novos — Silver/Gold não reprocessados.")
-    print("Execute o notebook 01 manualmente se quiser forçar a atualização.")
-
-# COMMAND ----------
-# MAGIC %md
-# MAGIC ## 4. Sumário de controle
-
-# COMMAND ----------
-
+# O Job gerencia a sequência 00 → 01 → 02 → 03.
+# Não encadeamos via dbutils.notebook.run() para evitar dupla execução.
 print("Histórico de downloads:")
 spark.sql("""
     SELECT ano, arquivo, round(content_length/1e6,1) AS mb,
@@ -287,3 +270,5 @@ spark.sql("""
     FROM _controle_coleta
     ORDER BY ano DESC, dt_download DESC
 """).show(truncate=False)
+
+dbutils.notebook.exit(f"ok: {anos_processados}")

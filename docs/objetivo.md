@@ -53,8 +53,9 @@ voltado à predição de ocorrências criminais na cidade.
 
 ## Plataforma
 
-Databricks Community Edition, com persistência em Delta Lake (arquitetura
-medallion: Bronze → Silver → Gold).
+Databricks Free Edition (serverless), com persistência em Delta Lake (arquitetura
+medallion: Bronze → Silver → Gold) e armazenamento intermediário em Unity Catalog
+Volumes (`workspace.sorocoba_seguranca.dados`).
 
 ## Observação sobre escopo
 

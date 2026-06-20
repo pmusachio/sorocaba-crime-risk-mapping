@@ -1,4 +1,4 @@
-# Runbook — execução no Databricks
+# Runbook — execução no Databricks Free Edition
 
 Passo a passo para reproduzir o pipeline completo e gerar as evidências
 exigidas pelo enunciado. **Todo processamento de dados acontece na nuvem**
@@ -11,13 +11,27 @@ exigidas pelo enunciado. **Todo processamento de dados acontece na nuvem**
 ```
 GitHub (código)
     │
-    ├─ GitHub Actions (cron semanal) ──→ Databricks API
-    │                                          │
-    └─ Databricks Repos (sync)            notebook 00
-                                          (download + Bronze)
-                                               │
-                                          notebook 01
-                                          (Silver + Gold)
+    └─ Databricks Repos (sync automático via Job)
+              │
+         Databricks Job (schedule semanal — segunda 06h BRT)
+         Serverless compute — sem cluster a gerenciar
+              │
+         ┌────▼──────────────────────────────┐
+         │ Task 1: notebook 00               │
+         │   coleta + Bronze                 │
+         │   armazena xlsx/parquet em        │
+         │   Unity Catalog Volume            │
+         └────┬──────────────────────────────┘
+              │
+         ┌────▼──────────────────────────────┐
+         │ Task 2: notebook 01               │
+         │   Silver + Gold (esquema estrela) │
+         └────┬──────────────────────────────┘
+              │
+     ┌────────┴────────┐
+     ▼                 ▼
+Task 3: 02_qualidade   Task 4: 03_analise
+(em paralelo após 01)
 ```
 
 ---
@@ -25,40 +39,46 @@ GitHub (código)
 ## 1. Conectar o repositório ao Databricks (Repos)
 
 1. No workspace Databricks: **Repos → Add Repo**.
-2. Informe a URL do repositório GitHub.
-3. Databricks clona o repositório em
-   `/Repos/<seu-email>/sorocaba-crime-risk-mapping/`.
-4. Para atualizar o código após commits: botão **Pull** na barra do Repo.
+2. Informe a URL: `https://github.com/pmusachio/sorocaba-crime-risk-mapping`
+3. Databricks clona em `/Repos/paulomusachio@gmail.com/sorocaba-crime-risk-mapping/`.
+4. O Job já usa `git_source` — puxa a branch `main` automaticamente em cada execução.
+   Para atualizar manualmente: botão **Pull** na barra do Repo.
 
-📸 **Evidência:** screenshot do Repo conectado no Databricks.
-
----
-
-## 2. Criar ou confirmar o cluster
-
-No Community Edition existe um único cluster. Confirme que está ativo ou
-crie um com as configurações padrão.
-
-📸 **Evidência:** `01_cluster_ativo.png` — screenshot do cluster ativo.
+📸 **Evidência:** screenshot do Repo conectado.
 
 ---
 
-## 3. Carga inicial — executar o notebook 00 manualmente
+## 2. Infraestrutura (já criada, sem ação necessária)
 
-Abra `/Repos/<email>/sorocaba-crime-risk-mapping/notebooks/00_coleta_incremental`
-e execute **Run All**.
+| Recurso | Identificador |
+|---|---|
+| Job | ID `885399393946221` — "Pipeline TCC Sorocaba — Coleta + ETL" |
+| Schedule | Segunda 06h00 America/Sao_Paulo |
+| UC Volume | `workspace.sorocoba_seguranca.dados` |
+| Compute | Serverless (sem cluster — Free Edition) |
 
-O notebook irá:
-- Baixar os 5 arquivos `.xlsx` da SSP-SP diretamente para o DBFS
-  (`dbfs:/FileStore/sorocaba_seguranca/xlsx/`)
-- Converter cada guia para Parquet via openpyxl streaming (sem OOM)
-- Criar a tabela Delta **Bronze** no schema `sorocaba_seguranca`
-- Encadear automaticamente o notebook 01 (Silver + Gold)
+O Job e o Volume já foram criados. Basta disparar a primeira execução.
+
+---
+
+## 3. Carga inicial — disparar o Job manualmente
+
+1. No Databricks: `Workflows → Jobs`.
+2. Localize "Pipeline TCC Sorocaba — Coleta + ETL".
+3. Clique em **Run now**.
+
+O Job irá:
+- **Task 1 (coleta_bronze):** baixar os 5 arquivos `.xlsx` da SSP-SP para o
+  Volume `/Volumes/workspace/sorocoba_seguranca/dados/xlsx/`, converter para Parquet
+  e escrever a tabela Delta **Bronze** no schema `workspace.sorocoba_seguranca`.
+- **Task 2 (silver_gold):** transformar Bronze em Silver + tabelas Gold (Esquema Estrela).
+- **Tasks 3 e 4 (qualidade + analise):** análise de qualidade e perguntas de negócio,
+  executadas em paralelo após o silver_gold.
 
 ⏱ Tempo estimado na carga inicial: 60–90 min (5 arquivos × ~190 MB cada).
 
 📸 **Evidências:**
-- `02_bronze_execucao.png` — saída da Seção 2 (anos processados + contagem Bronze)
+- `02_bronze_execucao.png` — saída da Seção 2 do notebook 00 (anos processados + contagem Bronze)
 - `03_silver_execucao.png` — saída da Seção 2 do notebook 01 (Silver)
 - `04_gold_execucao.png` — Seção 4 do notebook 01: contagens + integridade referencial
 
@@ -67,51 +87,23 @@ O notebook irá:
 
 ---
 
-## 4. Configurar o pipeline semanal (GitHub Actions)
+## 4. Pipeline semanal — automático
 
-### 4.1 Gerar token no Databricks
+O Job já tem schedule configurado. Nenhuma ação adicional necessária.
 
-`User Settings → Access Tokens → Generate New Token`
-Copie o token — ele só é exibido uma vez.
-
-### 4.2 Obter o Cluster ID
-
-URL do cluster no Databricks:
-`https://community.cloud.databricks.com/#setting/clusters/<CLUSTER_ID>/configuration`
-
-O `CLUSTER_ID` é a sequência após `/clusters/`.
-
-### 4.3 Criar segredos no GitHub
-
-`Repositório → Settings → Secrets and variables → Actions → New repository secret`
-
-| Segredo | Valor |
-|---|---|
-| `DATABRICKS_HOST` | `https://community.cloud.databricks.com` |
-| `DATABRICKS_TOKEN` | token do passo 4.1 |
-| `DATABRICKS_CLUSTER_ID` | cluster ID do passo 4.2 |
-| `DATABRICKS_USER` | seu e-mail no Databricks (ex.: `paulomusachio@gmail.com`) |
-
-### 4.4 Verificar o workflow
-
-O arquivo `.github/workflows/pipeline_semanal.yml` já está no repositório.
-Ele dispara todo semanal (segunda às 6h UTC) e pode ser disparado manualmente
-em `Actions → Pipeline Semanal SSP-SP → Run workflow`.
-
-O workflow submete o notebook 00 via API, aguarda conclusão com polling a
-cada 60 s e falha a execução no GitHub se o Databricks retornar erro.
-
-📸 **Evidência:** screenshot do workflow verde no GitHub Actions.
+O workflow `.github/workflows/pipeline_semanal.yml` existe como disparador
+manual de emergência via GitHub Actions, mas é redundante ao schedule nativo do Job.
 
 ---
 
 ## 5. Executar notebooks de análise
 
-Após o notebook 01 concluir (encadeado pelo 00 ou rodado manualmente):
+Após o Job concluir (tasks 3 e 4 executam automaticamente), os notebooks já terão rodado.
+Para re-executar manualmente:
 
 ### Notebook 02 — qualidade de dados
 
-Abra `02_qualidade_dados` e execute **Run All**.
+Abra `02_qualidade_dados` no Repo e execute **Run All**.
 - Anote os números reais para preencher:
   - Tabela-síntese da Seção 8 do próprio notebook
   - Coluna "Magnitude" no Catálogo de Dados (`docs/catalogo_de_dados.md`)
@@ -130,8 +122,9 @@ escreva a interpretação dos resultados reais.
 ## 6. Verificar tabelas registradas
 
 ```sql
--- rode em qualquer notebook ou no SQL Editor
-USE sorocaba_seguranca;
+-- rode no SQL Editor ou em qualquer notebook
+USE CATALOG workspace;
+USE sorocoba_seguranca;
 SHOW TABLES;
 ```
 
@@ -155,11 +148,11 @@ licença CC-BY 4.0 (`13_fonte_origem_ssp.png`).
 
 ## Checklist final (mapeado aos critérios de avaliação)
 
-- [ ] Notebook 00 roda do início ao fim sem erro (Coleta)
+- [ ] Job roda do início ao fim sem erro (Coleta)
 - [ ] Bronze contém dados de todos os anos (Coleta)
-- [ ] GitHub Actions verde com execução semanal configurada (Coleta)
+- [ ] Job com schedule semanal configurado — print do histórico de execuções (Coleta)
 - [ ] FK nula = 0 na Seção 4 do notebook 01 (Modelagem)
-- [ ] Tabelas Delta registradas no schema `sorocaba_seguranca` (Carga)
+- [ ] Tabelas Delta registradas no schema `workspace.sorocoba_seguranca` (Carga)
 - [ ] Notebook 02 com números reais + síntese preenchida (Análise — qualidade)
 - [ ] Notebook 03 com 6 discussões + síntese geral (Análise — solução)
 - [ ] Catálogo com magnitudes preenchidas (Modelagem — catálogo)

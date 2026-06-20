@@ -6,7 +6,7 @@
 da coleta à análise, como base de um sistema de inteligência territorial de
 segurança pública.**
 
-[![Databricks](https://img.shields.io/badge/Databricks-Community%20Edition-FF3621?style=flat-square&logo=databricks&logoColor=white)](https://www.databricks.com/try-databricks)
+[![Databricks](https://img.shields.io/badge/Databricks-Free%20Edition-FF3621?style=flat-square&logo=databricks&logoColor=white)](https://www.databricks.com/try-databricks)
 [![Delta Lake](https://img.shields.io/badge/Delta%20Lake-00ADD8?style=flat-square&logo=delta&logoColor=white)](https://delta.io/)
 [![License: CC BY 4.0](https://img.shields.io/badge/Data%20License-CC%20BY%204.0-lightgrey.svg?style=flat-square)](https://creativecommons.org/licenses/by/4.0/)
 
@@ -30,24 +30,22 @@ subsequente de Machine Learning voltado à predição de ocorrências.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  GitHub Actions (cron semanal — toda segunda 06h UTC)               │
-│  Chama Databricks API → dispara notebook 00                          │
+│  Databricks Jobs (schedule semanal — toda segunda 06h BRT)          │
+│  Orquestração nativa — sem cluster a gerenciar (serverless)          │
 └───────────────────────────────┬──────────────────────────────────────┘
-                                │
-                         Databricks Community Edition
                                 │
           ┌─────────────────────▼──────────────────────┐
           │  Notebook 00 — Coleta Incremental          │
           │  • HEAD request → detecta arquivo novo/    │
           │    alterado (Content-Length)                │
-          │  • Download xlsx → DBFS (urllib, no driver)│
+          │  • Download xlsx → UC Volume               │
+          │    /Volumes/workspace/sorocoba_seguranca/  │
           │  • Converte xlsx → Parquet (openpyxl,      │
           │    streaming em lotes, sem OOM)             │
           │  • Grava/atualiza Bronze Delta              │
           │    (replaceWhere por _ano_arquivo)          │
-          │  • Encadeia notebook 01                     │
           └─────────────────────┬──────────────────────┘
-                                │
+                                │  (Job gerencia sequência)
           ┌─────────────────────▼──────────────────────┐
           │  Notebook 01 — Silver + Gold               │
           │  • Reconciliação de schema (coalesce)      │
@@ -60,10 +58,10 @@ subsequente de Machine Learning voltado à predição de ocorrências.
 ```
 
 O Spark não lê `.xlsx` nativamente; openpyxl streaming em lotes de 100 k linhas
-evita OOM mesmo no driver do Community Edition (pico de memória limitado a um lote).
+evita OOM (pico de memória limitado a um lote por vez).
 
-**Plataforma:** Databricks Community Edition · **Formato:** Delta Lake ·
-**Particionamento:** por `ano_mes_ocorrencia` (yyyyMM derivado de `dt_ocorrencia_bo`)
+**Plataforma:** Databricks Free Edition (Serverless) · **Storage:** Unity Catalog Volumes ·
+**Formato:** Delta Lake · **Particionamento:** por `ano_mes_ocorrencia` (yyyyMM derivado de `dt_ocorrencia_bo`)
 
 ## Estrutura do repositório
 
@@ -177,16 +175,15 @@ Documentação completa de domínio, valores esperados e linhagem em
 
 ## Como reproduzir
 
-**Setup único (Databricks Repos + GitHub Actions):**
+**Setup único (Databricks Repos + Jobs nativos):**
 
 1. No Databricks: `Repos → Add Repo` → cole a URL deste repositório.
-2. Configure os 4 segredos no GitHub (`Settings → Secrets → Actions`):
-   - `DATABRICKS_HOST`, `DATABRICKS_TOKEN`, `DATABRICKS_CLUSTER_ID`, `DATABRICKS_USER`
-3. Execute o notebook `00_coleta_incremental` manualmente para a carga inicial.
-4. O GitHub Actions passa a rodar todo semanal automaticamente.
+2. O Job `885399393946221` já está configurado com schedule semanal (segunda 06h BRT) e
+   executa via serverless (sem cluster a criar).
+3. Para a carga inicial: dispare o Job manualmente em `Workflows → Jobs → Run now`.
 
 **Execução manual da análise:**
-- Execute `02_qualidade_dados` e `03_analise_perguntas_negocio` após o notebook 00/01.
+- Execute `02_qualidade_dados` e `03_analise_perguntas_negocio` após o Job concluir.
 
 Passo a passo detalhado em [`docs/RUNBOOK_DATABRICKS.md`](docs/RUNBOOK_DATABRICKS.md).
 
