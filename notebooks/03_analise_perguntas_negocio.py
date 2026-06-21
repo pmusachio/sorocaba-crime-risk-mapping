@@ -190,8 +190,7 @@ plt.tight_layout(); plt.show()
 
 # Visão complementar: total anual, com 2026 destacado como parcial
 df_ano = df_tend.groupby("ano")["total"].sum().reset_index()
-print("
-Total anual (2026 é parcial, não comparável diretamente):")
+print("\nTotal anual (2026 e parcial, nao comparavel diretamente):")
 print(df_ano)
 plt.figure()
 cores = ["#6272a4"] * (len(df_ano) - 1) + ["#ff5555"]

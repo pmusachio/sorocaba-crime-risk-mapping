@@ -139,8 +139,7 @@ print(f"dt_ocorrencia_bo nula: {df.filter(F.col('dt_ocorrencia_bo').isNull()).co
 
 # Inconsistência lógica: ocorrência DEPOIS do registro do BO
 df_ordem = df.filter(F.col("dt_ocorrencia_bo") > F.col("dt_registro_bo"))
-print(f"
-dt_ocorrencia_bo > dt_registro_bo (inconsistência lógica): {df_ordem.count():,}")
+print(f"\ndt_ocorrencia_bo > dt_registro_bo (inconsistencia logica): {df_ordem.count():,}")
 if df_ordem.count() > 0:
     df_ordem.select("num_bo", "dt_ocorrencia_bo", "dt_registro_bo", "rubrica").show(10, truncate=False)
 
@@ -186,9 +185,8 @@ df_flag = df.withColumn("rubrica_sensivel", sensivel)
     .withColumn("pct_hora_nula", F.round(100 * F.col("hora_nula") / F.col("total"), 2))
     .show(truncate=False)
 )
-print("Se o % de hora nula for muito maior no grupo sensível, reforça a hipótese de
-"
-      "vedação proposital — dado a ser PRESERVADO como nulo, não 'corrigido'.")
+print("Se o % de hora nula for muito maior no grupo sensivel, reforca a hipotese de "
+      "vedacao proposital — dado a ser PRESERVADO como nulo, nao 'corrigido'.")
 
 # COMMAND ----------
 # MAGIC %md
@@ -198,8 +196,7 @@ print("Se o % de hora nula for muito maior no grupo sensível, reforça a hipót
 
 for col_nome in ["rubrica", "natureza_apurada", "bairro", "desc_periodo", "descr_tipolocal"]:
     qtd = df.select(col_nome).distinct().count()
-    print(f"
-{col_nome}: {qtd} valores únicos")
+    print(f"\n{col_nome}: {qtd} valores unicos")
     valores = [r[0] for r in df.select(col_nome).distinct().collect() if r[0] is not None]
     norm = {}
     for v in valores:

@@ -116,16 +116,19 @@ df_s = df_b.select(
                col_ou_nulo(df_b, "NOME_MUNICIPIO_CIRCUNSCRICAO")).alias("municipio_circunscricao"),
     col_ou_nulo(df_b, "MES_ESTATISTICA").alias("mes_estatistica"),
     col_ou_nulo(df_b, "ANO_ESTATISTICA").alias("ano_estatistica"),
-    col_ou_nulo(df_b, "COD IBGE").alias("cod_ibge"),
+    col_ou_nulo(df_b, "COD_IBGE").alias("cod_ibge"),  # Bronze sanitiza: "COD IBGE" -> "COD_IBGE"
     F.col("_arquivo_origem"),
     F.col("_guia_origem"),
 )
 
 # --- (2) Tipagem ---
+# Datas: limpa sentinelas textuais ANTES de to_date para evitar CANNOT_PARSE_TIMESTAMP
+# (Databricks ANSI mode rejeita strings como 'NULL' em vez de retornar null)
+_SENT_DATA = ["NULL", "(Vazio)", "-", ""]
 df_s = (
     df_s
-    .withColumn("dt_ocorrencia_bo", F.to_date("dt_ocorrencia_bo", "yyyy-MM-dd"))
-    .withColumn("dt_registro_bo",   F.to_date("dt_registro_bo",   "yyyy-MM-dd"))
+    .withColumn("dt_ocorrencia_bo", F.to_date(to_null_se(F.col("dt_ocorrencia_bo"), _SENT_DATA), "yyyy-MM-dd"))
+    .withColumn("dt_registro_bo",   F.to_date(to_null_se(F.col("dt_registro_bo"),   _SENT_DATA), "yyyy-MM-dd"))
     .withColumn("ano_bo",           F.col("ano_bo").cast(IntegerType()))
     .withColumn("mes_estatistica",  F.col("mes_estatistica").cast(IntegerType()))
     .withColumn("ano_estatistica",  F.col("ano_estatistica").cast(IntegerType()))
@@ -281,14 +284,12 @@ for t in ["bronze", "silver", "dim_data", "dim_local", "dim_tipo_ocorrencia", "f
     print(f"  {t:<25}: {spark.table(t).count():,}")
 
 fato = spark.table("fato_ocorrencia")
-print("
-Integridade referencial (deve ser 0 em todas):")
+print("\nIntegridade referencial (deve ser 0 em todas):")
 print(f"  id_local nulo          : {fato.filter(F.col('id_local').isNull()).count():,}")
 print(f"  id_tipo_ocorrencia nulo: {fato.filter(F.col('id_tipo_ocorrencia').isNull()).count():,}")
 print(f"  id_data nulo (s/data)  : {fato.filter(F.col('id_data').isNull()).count():,}")
 
-print("
-Distribuição de partições (ano_mes_ocorrencia):")
+print("\nDistribuicao de particoes (ano_mes_ocorrencia):")
 spark.sql("""
     SELECT ano_mes_ocorrencia, COUNT(*) AS total
     FROM fato_ocorrencia
