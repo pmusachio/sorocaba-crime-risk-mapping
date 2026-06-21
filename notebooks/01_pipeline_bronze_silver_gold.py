@@ -122,25 +122,27 @@ df_s = df_b.select(
 )
 
 # --- (2) Tipagem ---
-# Datas: limpa sentinelas textuais ANTES de to_date para evitar CANNOT_PARSE_TIMESTAMP
-# (Databricks ANSI mode rejeita strings como 'NULL' em vez de retornar null)
+# Databricks ANSI mode: .cast() lança exceção em vez de retornar null.
+# Usamos try_cast (via F.expr) para todos os campos numéricos e
+# to_null_se antes de to_date para campos de data.
 _SENT_DATA = ["NULL", "(Vazio)", "-", ""]
 df_s = (
     df_s
     .withColumn("dt_ocorrencia_bo", F.to_date(to_null_se(F.col("dt_ocorrencia_bo"), _SENT_DATA), "yyyy-MM-dd"))
     .withColumn("dt_registro_bo",   F.to_date(to_null_se(F.col("dt_registro_bo"),   _SENT_DATA), "yyyy-MM-dd"))
-    .withColumn("ano_bo",           F.col("ano_bo").cast(IntegerType()))
-    .withColumn("mes_estatistica",  F.col("mes_estatistica").cast(IntegerType()))
-    .withColumn("ano_estatistica",  F.col("ano_estatistica").cast(IntegerType()))
+    .withColumn("ano_bo",           F.expr("try_cast(ano_bo AS INT)"))
+    .withColumn("mes_estatistica",  F.expr("try_cast(mes_estatistica AS INT)"))
+    .withColumn("ano_estatistica",  F.expr("try_cast(ano_estatistica AS INT)"))
 )
 
 # --- (3) Sentinelas → nulo ---
 for c in ["latitude", "longitude"]:
-    df_s = df_s.withColumn(c, to_null_se(F.col(c), ["-", "NULL", ""]).cast(DoubleType()))
+    df_s = df_s.withColumn(c, F.expr(f"try_cast(case when trim({c}) in ('-','NULL','') then null else {c} end AS DOUBLE)"))
     df_s = df_s.withColumn(c, F.when(F.col(c) == 0, None).otherwise(F.col(c)))
 
-df_s = df_s.withColumn("cod_ibge", to_null_se(F.col("cod_ibge"), ["(Vazio)", "NULL", ""]).cast(IntegerType()))
-df_s = df_s.withColumn("numero_logradouro", to_null_se(F.col("numero_logradouro"), ["", "NULL", "0"]).cast(IntegerType()))
+# try_cast tolera 'KM 102', 'NULL', etc. retornando null (ANSI mode)
+df_s = df_s.withColumn("cod_ibge", F.expr("try_cast(cod_ibge AS INT)"))
+df_s = df_s.withColumn("numero_logradouro", F.expr("try_cast(numero_logradouro AS INT)"))
 df_s = df_s.withColumn("hora_ocorrencia_bo", to_null_se(F.col("hora_ocorrencia_bo"), ["NULL", "", "-"]))
 
 for c in ["municipio", "num_bo", "desc_periodo", "descr_tipolocal", "descr_subtipolocal",
