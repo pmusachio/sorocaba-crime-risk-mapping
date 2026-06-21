@@ -138,6 +138,12 @@ def render_valor(v):
     return str(v)
 
 
+def _sanitize_col(name: str) -> str:
+    """Substitui caracteres invalidos para nomes de coluna Delta por underscore."""
+    import re
+    return re.sub(r'[ ,;{}()\n\t=]', '_', name)
+
+
 def processar_guia_staging(caminho_xlsx: str, guia: str, ano: int, staging: str) -> int:
     """
     Le uma guia xlsx em lotes via openpyxl streaming, converte para pandas e
@@ -151,7 +157,9 @@ def processar_guia_staging(caminho_xlsx: str, guia: str, ano: int, staging: str)
     ws = wb[guia]
     rows_iter = ws.iter_rows(values_only=True)
 
-    header  = [str(h).strip() if h is not None else f"_col{i}"
+    # Delta nao aceita espacos ou caracteres especiais em nomes de coluna
+    # ex.: "COD IBGE" -> "COD_IBGE"
+    header  = [_sanitize_col(str(h).strip()) if h is not None else f"_col{i}"
                for i, h in enumerate(next(rows_iter))]
     audit   = ["_arquivo_origem", "_guia_origem", "_ano_arquivo", "_dt_ingestao"]
     colunas = header + audit
