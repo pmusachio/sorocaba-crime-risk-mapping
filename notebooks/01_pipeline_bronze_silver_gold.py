@@ -122,14 +122,13 @@ df_s = df_b.select(
 )
 
 # --- (2) Tipagem ---
-# Databricks ANSI mode: .cast() lança exceção em vez de retornar null.
-# Usamos try_cast (via F.expr) para todos os campos numéricos e
-# to_null_se antes de to_date para campos de data.
-_SENT_DATA = ["NULL", "(Vazio)", "-", ""]
+# Databricks ANSI mode: .cast() e to_date() lancam excecao em valores invalidos.
+# try_cast e try_to_date retornam null para qualquer valor nao-parseavel,
+# incluindo sentinelas ('NULL', '(Vazio)'), seriais Excel ('44874') e outros.
 df_s = (
     df_s
-    .withColumn("dt_ocorrencia_bo", F.to_date(to_null_se(F.col("dt_ocorrencia_bo"), _SENT_DATA), "yyyy-MM-dd"))
-    .withColumn("dt_registro_bo",   F.to_date(to_null_se(F.col("dt_registro_bo"),   _SENT_DATA), "yyyy-MM-dd"))
+    .withColumn("dt_ocorrencia_bo", F.expr("try_to_date(dt_ocorrencia_bo, 'yyyy-MM-dd')"))
+    .withColumn("dt_registro_bo",   F.expr("try_to_date(dt_registro_bo,   'yyyy-MM-dd')"))
     .withColumn("ano_bo",           F.expr("try_cast(ano_bo AS INT)"))
     .withColumn("mes_estatistica",  F.expr("try_cast(mes_estatistica AS INT)"))
     .withColumn("ano_estatistica",  F.expr("try_cast(ano_estatistica AS INT)"))
