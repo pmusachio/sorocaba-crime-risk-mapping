@@ -36,22 +36,38 @@ construção do pipeline):
 - **Reconciliação de schema entre 5 anos.** Renomeações (`CIDADE`→`NOME_MUNICIPIO`),
   troca de cedilha nas colunas de circunscrição e a entrada de `DESCR_TIPOLOCAL` em
   2025 exigiram reconciliação por nome (nunca por posição).
-- **Leitura de `.xlsx` grande em serverless.** Arquivos de ~190 MB não podem ser
-  lidos diretamente pelo Spark. A solução final foi openpyxl streaming em lotes de
-  50 k linhas → pandas DataFrame → `spark.createDataFrame()` → Delta staging, sem
-  nenhum arquivo intermediário acessado pelo Spark. Abordagens anteriores tentadas
-  (DBFS, `/tmp` via `file://`) falharam com restrições do Free Edition serverless:
-  DBFS público desativado (`DBFS_DISABLED`) e filesystem local bloqueado pelo Spark
-  (`LocalFilesystemAccessDeniedException`).
+- **Leitura de `.xlsx` grande em serverless — três tentativas até a solução.**
+  Arquivos de ~190 MB não podem ser lidos diretamente pelo Spark. A solução final
+  foi openpyxl streaming em lotes de 200 k linhas → pandas DataFrame →
+  `spark.createDataFrame()` → Delta staging → Bronze, sem arquivo intermediário
+  no disco. Abordagens anteriores falharam em cadeia:
+  1. DBFS (`/dbfs/FileStore/`) → bloqueado (`DBFS_DISABLED`: DBFS público desativado no Free Edition)
+  2. Unity Catalog Volume (`/Volumes/...`) → `os.makedirs` retorna `errno 95` (FUSE mount não suporta mkdir em serverless)
+  3. `/tmp` via `file:///tmp/` no Spark → `LocalFilesystemAccessDeniedException` (serverless restringe Spark a `/Workspace/`)
+  4. Solução final: `/tmp` para download Python (funciona), `createDataFrame` para passar dados ao Spark (sem tocar o filesystem)
+
+- **ANSI mode do Databricks mais estrito que o Spark padrão.** Três erros de execução
+  causados por comportamento diferente do esperado:
+  - `.cast(IntegerType())` lança exceção em `'KM 102'` (número de logradouro em rodovia) → substituído por `try_cast`
+  - `to_date()` lança exceção na string `'NULL'` em vez de retornar nulo → sentinelas limpos com `to_null_se` antes do parse
+  - Nomes de coluna com espaço (`COD IBGE`) rejeitados pelo Delta → sanitizados com regex ao ler o xlsx
+
 - **Semântica de ano estatístico × ano de ocorrência.** Descobrir que
   `ano_estatistica` é o ano de *registro* evitou tanto uma falsa detecção de "datas
   inválidas" (ocorrências de anos anteriores são legítimas) quanto conclusões erradas
   na análise de tendência.
+
 - **Databricks Free Edition substituiu o Community Edition** durante o desenvolvimento.
   A migração exigiu adaptar toda a estratégia de armazenamento: DBFS desativado,
   compute exclusivamente serverless (sem clusters all-purpose), Unity Catalog obrigatório.
   A orquestração via Jobs nativos (DAG de 4 tasks) eliminou a dependência do GitHub
   Actions como único orquestrador.
+
+- **Tempo de carga inicial elevado.** Com lotes de 50 k linhas, a carga inicial dos
+  5 anos (~9 M linhas do Estado de SP) gerou ~180 transações Delta, ultrapassando o
+  timeout padrão de 4h do Job. Solução: lotes de 200 k linhas (~45 transações) e
+  timeout ampliado para 8h. Execuções incrementais subsequentes reprocessam apenas
+  o ano corrente (controle via `Content-Length`), levando ~15–20 min.
 
 ## 3. Trabalhos futuros
 
