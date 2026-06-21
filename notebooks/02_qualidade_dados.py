@@ -51,7 +51,7 @@ amostra_sentinelas = bronze.select(
     F.sum((col_bronze("LATITUDE") == "-").cast("int")).alias("lat_traco"),
     F.sum((col_bronze("LATITUDE") == "NULL").cast("int")).alias("lat_null_str"),
     F.sum((col_bronze("HORA_OCORRENCIA_BO") == "NULL").cast("int")).alias("hora_null_str"),
-    F.sum((col_bronze("COD IBGE") == "(Vazio)").cast("int")).alias("ibge_vazio"),
+    F.sum((col_bronze("COD_IBGE") == "(Vazio)").cast("int")).alias("ibge_vazio"),
 )
 print("Contagem de sentinelas brutas na Bronze (todo o Estado de SP):")
 amostra_sentinelas.show(truncate=False)
