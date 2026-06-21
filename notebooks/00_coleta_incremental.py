@@ -53,7 +53,7 @@ CONFIG_ANOS = {
 }
 
 ANO_CORRENTE = max(CONFIG_ANOS.keys())
-LOTE         = 50_000   # linhas por pandas batch (mantém pico de RAM baixo)
+LOTE         = 200_000  # linhas por pandas batch; 200k ≈ 300 MB RAM, ~45 writes totais
 
 spark.sql(f"USE CATALOG {CATALOG}")
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
