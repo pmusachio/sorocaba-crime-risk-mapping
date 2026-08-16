@@ -1,0 +1,29 @@
+# Dados brutos e intermediários não vão para o repositório: são reproduzíveis
+# pelo notebook 01 a partir da fonte, e somam cerca de 1 GB.
+data/
+*.xlsx
+*.parquet
+*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Material didático da PUC-Rio e descritivo da atividade: são material de aula
+# protegido por direito autoral e não devem ser redistribuídos em repositório
+# público. Ficam apenas na cópia local, como referência de trabalho.
+references/
+
+# Sistema
+.DS_Store
+
+# Credenciais — nunca versionar
+*.json.key
+credentials*.json
+service-account*.json
+
+# Scripts da tentativa anterior, mantidos localmente apenas como referência
+# de origem dos dados. Não fazem parte do pipeline entregue.
+scripts-projeto-antigo/
