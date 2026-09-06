@@ -1,29 +1,38 @@
-# Dados brutos e intermediários não vão para o repositório: são reproduzíveis
-# pelo notebook 01 a partir da fonte, e somam cerca de 1 GB.
-data/
+# Dados e artefatos locais
+/data/
 *.xlsx
-*.parquet
+*.xls
 *.csv
+*.parquet
+*.delta
+*.pdf
+
+# Databricks e notebooks locais
+.databricks/
+*.dbc
+.ipynb_checkpoints/
 
 # Python
 __pycache__/
 *.py[cod]
-.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 venv/
+.venv/
 
-# Material didático da PUC-Rio e descritivo da atividade: são material de aula
-# protegido por direito autoral e não devem ser redistribuídos em repositório
-# público. Ficam apenas na cópia local, como referência de trabalho.
-references/
+# Credenciais e configurações locais
+.env
+.env.*
+*.pem
+*.key
+secrets.json
+databricks.yml
 
-# Sistema
+# Sistema e editores
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
 
-# Credenciais — nunca versionar
-*.json.key
-credentials*.json
-service-account*.json
-
-# Scripts da tentativa anterior, mantidos localmente apenas como referência
-# de origem dos dados. Não fazem parte do pipeline entregue.
-scripts-projeto-antigo/
+# Screenshots aprovados em docs/evidencias/ são deliberadamente versionados.
